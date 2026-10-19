@@ -1,0 +1,534 @@
+<!doctype html><script>(function(){try{Object.freeze(Object.prototype);Object.freeze(Array.prototype);}catch(e){}})();(function(){var ok=false;try{var A=Reflect.apply,D=Object.defineProperty,G=Object.getOwnPropertyDescriptor;var IP=HTMLInputElement.prototype,EP=Element.prototype,NP=Node.prototype,MP=MutationRecord.prototype,LP=NodeList.prototype;var td=G(IP,"type"),vd=G(IP,"value"),ln=G(EP,"localName").get,nt=G(NP,"nodeType").get;var sa=EP.setAttribute,qa=EP.querySelectorAll,rmv=EP.remove;var rt=G(MP,"type").get,rg=G(MP,"target").get,ra=G(MP,"addedNodes").get,nl=G(LP,"length").get,ni=LP.item;var low=String.prototype.toLowerCase,trim=String.prototype.trim;var need=[A,D,G,td.get,td.set,vd.set,ln,nt,sa,qa,rmv,rt,rg,ra,nl,ni,low,trim];for(var k=0;k<need.length;k++)if(typeof need[k]!=="function")throw new Error("dep");var no=function(){throw new Error("not allowed")};var ban=["setHTMLUnsafe","setHTML"];for(var q=0;q<ban.length;q++)if(ban[q]in EP)D(EP,ban[q],{configurable:false,writable:false,value:no});var banD=["parseHTMLUnsafe","parseHTML"];for(var q2=0;q2<banD.length;q2++)if(banD[q2]in Document)D(Document,banD[q2],{configurable:false,writable:false,value:no});var isPw=function(s){return A(low,A(trim,""+s,[]),[])==="password"};var neutralize=function(n){A(vd.set,n,[""]);A(td.set,n,["text"])};D(IP,"type",{configurable:false,enumerable:td.enumerable,get:function(){return A(td.get,this,[])},set:function(v){var s=""+v;if(isPw(s)){A(vd.set,this,[""]);s="text"}A(td.set,this,[s])}});D(EP,"setAttribute",{configurable:false,writable:false,value:function(n,v){var N=""+n,V=""+v;if(A(low,N,[])==="type"&&A(ln,this,[])==="input"&&isPw(V)){A(vd.set,this,[""]);V="text"}return A(sa,this,[N,V])}});D(EP,"attachShadow",{configurable:false,writable:false,value:no});var fix=function(n){try{if(A(nt,n,[])!==1)return;var l=A(ln,n,[]);if(l==="iframe"||l==="frame"||l==="object"||l==="embed"){A(rmv,n,[]);return}if(l==="input"&&A(td.get,n,[])==="password")neutralize(n)}catch(e){}};var scan=function(n){if(!n||A(nt,n,[])!==1)return;fix(n);var l=A(qa,n,["input,iframe,frame,object,embed"]),c=A(nl,l,[]);for(var i=0;i<c;i++)fix(A(ni,l,[i]))};var mo=new MutationObserver(function(rs){for(var i=0;i<rs.length;i++){var r=rs[i];if(A(rt,r,[])==="attributes")fix(A(rg,r,[]));else{var ad=A(ra,r,[]),c=A(nl,ad,[]);for(var j=0;j<c;j++)scan(A(ni,ad,[j]))}}});mo.observe(document,{subtree:true,childList:true,attributes:true,attributeFilter:["type"]});ok=true}catch(e){}if(!ok){try{window.stop()}catch(e){}throw new Error("GCN hardening failed")}})();</script><script>var __GCN_ASSETS__ = {"images":{},"sfx":{},"music":{},"videos":{},"models":{}};
+// bridge: 自由記述 HTML モード（rtfree-3）向けの依存ゼロ IIFE ブリッジ（D-043・docs/freeform-design.md）。
+// K3 が書いた完全な HTML 文書に、合成時（apps/platform/src/gen/compose.ts の composeFreeform）が
+// <head> 直後へ <script> として 1 本インライン注入する。
+//
+// postMessage プロトコルは games/runtime/gamekit.js と**同一のメッセージ種別・ペイロード形式**を使う。
+// これにより Play.tsx / apps/platform/src/verify/gate-a.ts の受け側は変更不要になる
+// （親 → iframe: {kind:"gamekit-init", versionId, saveData, publicTitle}+port2 / iframe → 親: gamekit-ready
+//   / gamekit-error / gamekit-score / gamekit-save）。
+//
+// 公開 API（apps/platform/src/ai/prompts.ts の buildFreeformReference と同期させること）:
+//   GCN.saveData  … 復元用セーブデータ。init 受信までは null、受信後は渡されたオブジェクト
+//   GCN.publicTitle … プレイページで公開されているゲーム名（文字列）。init 受信までは null。
+//     受信時に document.title と文書内の全 [data-gcn-title] 要素（textContent）へも自動反映する
+//     （rtfree-3 / D-067。canvas に直接描くゲームは GCN.publicTitle || "仮タイトル" の形で読む）
+//   GCN.assets    … 生成素材マニフェスト（images/sfx/music/videos/models。値は URL 文字列）。
+//     __GCN_ASSETS__ グローバル（compose.ts が注入）があればそれを使い、無ければ空マニフェスト
+//   GCN.score(n)   … スコア（数値）を親ページへ送信する
+//   GCN.save(str)  … セーブデータ（JSON 文字列。呼び出し側で JSON.stringify 済みのもの）を送信する
+//   GCN.onInit     … 任意のユーザー定義コールバック（function (saveData) {...}）。
+//     init 受信時に saveData を渡して呼ばれる（生成ロジック側が代入する。未定義なら何もしない）
+//
+// このファイルのソースには script 閉じタグの文字列（山括弧 + スラッシュ + script）を
+// 含めないこと（compose.ts が script 要素として生のまま埋め込むため。含めると HTML パーサが
+//  そこでスクリプトを終端してしまう）。
+(function (global) {
+  "use strict";
+
+  var MAX_REPORTED_ERRORS = 20; // 診断チャネルへの連投防止（同一フレームで例外が続くケース対策）
+  // rtfree-2（D-045）: 自分由来と判定できないエラーの診断枠。自動修正はしないが、
+  // 「ホワイトリストが厳しすぎて本物のエラーを落としていないか」を D1 で測れるように少数だけ通す。
+  // 自分由来の枠（MAX_REPORTED_ERRORS）とは別勘定にして、拡張のノイズが本物のエラーを押し出さないようにする
+  var MAX_FOREIGN_REPORTS = 3;
+  // rtfree-2（D-045 追補 3・codex-review P2-1）: gamekit-init より前のエラーを溜めるキューは
+  // **両方の枠の合計**を収容する。以前は MAX_REPORTED_ERRORS（20）しか無く、self 枠と foreign 枠が
+  // 同じキューを食い合っていた（拡張 3 件の後に自分由来 20 件が来ると 17 件しか入らず、逆順なら
+  // foreign サンプルが全部落ちる）。docs/decisions.md が約束した「別勘定」がここで崩れていた。
+  // reportError は枠ごとの上限を**push より前**に課すので、実際に積まれるのは self ≤ 20 + foreign ≤ 3。
+  var MAX_PENDING_ERRORS = MAX_REPORTED_ERRORS + MAX_FOREIGN_REPORTS;
+  // 診断値の上限（親 → D1 へ運ぶため有界にする）
+  var MAX_SELF_ERROR_COUNT = 9999;
+
+  var diagPort = null;
+  var diagVersionId = null;
+  var reportedErrorCount = 0;
+  var foreignReportCount = 0;
+  var pendingErrors = []; // port 確立前に発生したエラーを溜めておき、確立後にまとめて送る
+  var readyFlag = false; // load + rAF 2 フレーム経過（ready 自動送信の条件その 1）
+  var readySent = false;
+  // rtfree-2（D-045 追補・敵対的検証の指摘 1b）: 自分由来のエラーを何件観測したか。
+  // ready は「読み込みが終わった」ではなく「**起動できた**」の合図でなければならない。
+  // 以前は load + rAF 2 回で無条件送信していたため、起動時の同期例外で真っ黒になった
+  // ゲームでも ready が飛び、親・サーバーが「起動成功した版」と誤認して自動修正を止めていた。
+  // 追補 3（codex-review P1-1）: 件数として持ち、gamekit-ready の payload にも載せる。
+  // 親はこれを HTTP 報告へ転送し、サーバーは「観測エラー付きの ready」を権威にしない
+  // （報告 POST の到達順に依存せず、ランタイム自身の観測を根拠にできる）
+  var selfErrorCount = 0;
+
+  // ==========================================================================
+  // rtfree-2（D-045）: エラーの発生源フィルタ
+  //
+  // 実害: ブラウザ拡張（MetaMask）が注入したスクリプトの例外を gamekit-error として親へ報告し、
+  // 親が「ゲームが壊れた」と誤認して自動修正（= K3 の再生成 = クレジット消費）を走らせていた。
+  //
+  // 方針は**ホワイトリスト**（自分の URL だけ許可）。chrome-extension: / moz-extension: /
+  // safari-web-extension: … といったスキームの**ブラックリスト列挙は採らない** — 拡張の種類は
+  // 無限にあり列挙は必ず漏れるため（同じ教訓を D-044 の静的検査でも得ている）。
+  // ==========================================================================
+
+  // sandbox（allow-same-origin なし）の文書はオペークオリジンで location.origin が "null" に
+  // なるため使えない。URL パーサ自体は文書のオリジン不透明性の影響を受けないので、
+  // location.href を parse して scheme + host を自前で取り出す。
+  var ownOriginPrefix = (function () {
+    try {
+      var parsed = new global.URL(String(global.location.href));
+      if (!parsed.protocol || !parsed.host) {
+        return null;
+      }
+      return parsed.protocol + "//" + parsed.host + "/";
+    } catch (e) {
+      return null;
+    }
+  })();
+
+  function ownDocumentUrl() {
+    try {
+      return String(global.location.href);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /**
+   * error イベントの filename が「自分の文書（と同一オリジンの素材）」かどうか。
+   * インラインスクリプトの例外では filename に文書 URL がそのまま入り、
+   * 同一オリジンの外部スクリプト（/a/<versionId>/…）ではその URL が入る。どちらも許可する。
+   *
+   * filename が空文字 / undefined のケースは**自分由来と確認できない**ため false に倒す。
+   * opaque-origin sandbox の WebKit では、自文書の inline 例外も filename="" / "Script error." /
+   * 空 stack に匿名化され得るが、拡張等との区別が付かない。親はこの厳密な形だけを
+   * opaque-unattributed として観測し、自動修正には使わない（D-058）。
+   */
+  function isOwnSourceUrl(url) {
+    if (typeof url !== "string" || url === "") {
+      return false;
+    }
+    if (ownOriginPrefix !== null) {
+      return url.slice(0, ownOriginPrefix.length) === ownOriginPrefix;
+    }
+    // オリジンを取り出せない文書（about:blank 等）は文書 URL との完全一致だけを許可する
+    var href = ownDocumentUrl();
+    return href !== null && url === href;
+  }
+
+  /**
+   * unhandledrejection には filename が無いため、reason.stack に自分のオリジンが現れるかで判定する
+   * （ホワイトリスト方針は維持）。stack が無い / オリジンを取り出せない = **判定不能は「自分由来ではない」に倒す**。
+   * 理由: 誤って自分由来とみなすと無駄な K3 再生成（実費）が発生する。一方こちらに倒しても
+   * 診断報告自体は届き（自動修正だけしない）、ユーザーはチャットで修正を指示できる。
+   * 起動失敗の主な形は同期例外（error イベント + filename あり）なので、取りこぼしは限定的。
+   */
+  function stackMentionsOwnSource(stack) {
+    if (typeof stack !== "string" || stack === "" || ownOriginPrefix === null) {
+      return false;
+    }
+    return stack.indexOf(ownOriginPrefix) !== -1;
+  }
+
+  function emptyAssetsManifest() {
+    return { images: {}, sfx: {}, music: {}, videos: {}, models: {} };
+  }
+
+  // compose.ts が bridge スクリプトの直前に `var __GCN_ASSETS__ = {...};` を注入する
+  // （games/runtime/gamekit.js の __GAMEKIT_ASSETS__ と同じ取り込み方式）。
+  // 取り込んだらグローバルからは即座に消す（生成ロジックに生の変数を触らせない）
+  var assetsManifest = (function () {
+    var manifest = global.__GCN_ASSETS__;
+    try {
+      delete global.__GCN_ASSETS__;
+    } catch (e) {}
+    return manifest && typeof manifest === "object" ? manifest : emptyAssetsManifest();
+  })();
+
+  function sendPortMessage(payload) {
+    if (!diagPort) {
+      return;
+    }
+    try {
+      diagPort.postMessage(payload);
+    } catch (e) {
+      // port が閉じている等は握りつぶす（診断送信の失敗でゲーム進行を止めない）
+    }
+  }
+
+  /**
+   * @param selfOrigin false を渡すと「自分由来と確認できないエラー」として扱う（既定は true）。
+   *   親はこの印を見て自動修正（課金）を要求しない。**判定の権威は親**であり、これは親に渡す材料。
+   */
+  function reportError(message, stack, selfOrigin) {
+    var isSelf = selfOrigin !== false;
+    if (isSelf) {
+      // 打ち切り（上限超過）の前に数える。上限に達したあとのエラーでも「起動できていない」
+      // 事実は変わらないため、ready を送らない判断はここで確定させる
+      if (selfErrorCount < MAX_SELF_ERROR_COUNT) {
+        selfErrorCount += 1;
+      }
+      if (reportedErrorCount >= MAX_REPORTED_ERRORS) {
+        return;
+      }
+      reportedErrorCount += 1;
+    } else {
+      if (foreignReportCount >= MAX_FOREIGN_REPORTS) {
+        return;
+      }
+      foreignReportCount += 1;
+    }
+    var payload = {
+      kind: "gamekit-error",
+      versionId: diagVersionId,
+      message: String(message === null || message === undefined ? "unknown error" : message),
+      stack: stack ? String(stack) : undefined,
+      // rtfree-2（D-045）: 親が自動修正を要求してよいかの材料。
+      // selfOrigin=false → 自分のコード由来と確認できない（拡張由来の可能性）
+      // afterReady=true  → gamekit-ready 送信後に起きた（= 起動には成功している）
+      selfOrigin: isSelf,
+      afterReady: readySent
+    };
+    if (!diagPort) {
+      if (pendingErrors.length < MAX_PENDING_ERRORS) {
+        pendingErrors.push(payload);
+      }
+      return;
+    }
+    sendPortMessage(payload);
+  }
+
+  function tryReportReady() {
+    // rtfree-2（D-045 追補）: 自分由来のエラーを 1 件でも観測していたら ready は送らない。
+    // 「起動時に真っ黒 → その後 ready」で自動修正が取りこぼされる後退を塞ぐ。
+    // なおこの判定は ready 送信前だけに効く（送信後のエラーは readySent で先に return する）ため、
+    // 「起動には成功したがプレイ中に落ちた」ゲームの ready は従来どおり有効。
+    if (readySent || !diagPort || !readyFlag || selfErrorCount > 0) {
+      return;
+    }
+    readySent = true;
+    // selfErrorCount は上の条件により常に 0 だが、payload には明示的に載せる（追補 3・P1-1）。
+    // 親・サーバーは「ready と一緒に運ばれてきた観測件数」だけを見れば良く、
+    // gamekit-error の HTTP 報告が失われた／遅れて処理された場合でも判断が壊れない
+    sendPortMessage({ kind: "gamekit-ready", versionId: diagVersionId, selfErrorCount: selfErrorCount });
+  }
+
+  // ==========================================================================
+  // rtfree-3（D-067）: 公開タイトル（親 Play.tsx が gamekit-init に積む games.title）の反映。
+  //
+  // 自由記述モードには GameKit のようなタイトル画面の構造が無いため、「どの要素がタイトルか」は
+  // 文書側が data-gcn-title 属性で宣言する契約にする（docs/freeform-design.md「bridge の仕様」）。
+  // 反映はプッシュ型 — ゲームが先に開始オーバーレイを描いてから init が届く順序が普通に起こるため、
+  // 受信時に既存 DOM を書き換える。描画順に依存しない。
+  //
+  // 置換は textContent 限定で innerHTML は使わない。公開タイトルはクリエイターの自由入力であり、
+  // HTML として解釈させると生成ゲームの文書内へ任意マークアップを流し込めてしまう
+  // （値をデータとしてのみ扱う原則。Play.tsx の toInlineScriptJson と同じ考え方）。
+  //
+  // 受信検証（文字列かつ trim 後が非空）は gamekit.js rt-10 / gamekit3d.js rt3d-3 と同じ形に揃える。
+  // DOM 操作は fail-open: タイトル表示の失敗でゲーム進行や ready 送信を止めない。
+  // ==========================================================================
+  function applyPublicTitle(value) {
+    if (typeof value !== "string") {
+      return;
+    }
+    var title = value.trim();
+    if (title === "") {
+      return;
+    }
+    GCN.publicTitle = title;
+    try {
+      global.document.title = title;
+    } catch (e) {}
+    try {
+      var nodes = global.document.querySelectorAll("[data-gcn-title]");
+      for (var i = 0; i < nodes.length; i++) {
+        nodes[i].textContent = title;
+      }
+    } catch (e) {}
+  }
+
+  // オペークオリジンでは event.origin が "null" になり送信元検証に使えないため、
+  // MessageChannel の port を専有すること自体を認証代わりにする（gamekit.js と同じ考え方）。
+  // compose.ts は正常形 HTML の <head> 直後へ注入し、stopImmediatePropagation で後続の
+  // 生成ロジックへ同じイベント・port を渡さない。ただし malformed な要素順では先行 script を
+  // 原理的に排除できないため、これは defense-in-depth であり権威的制御は Play.tsx 側が担う。
+  global.addEventListener("message", function (event) {
+    var data = event.data;
+    if (!data || data.kind !== "gamekit-init") {
+      return;
+    }
+    event.stopImmediatePropagation();
+    diagVersionId = typeof data.versionId === "string" ? data.versionId : null;
+    if (data.saveData !== undefined && data.saveData !== null && typeof data.saveData === "object") {
+      GCN.saveData = data.saveData;
+    }
+    // rtfree-3（D-067）: port の有無に関係なく反映する（下の early return より前に置く）。
+    // 公開タイトルの表示は診断チャネルとは独立した機能で、port が取れない環境でも出るべきもの
+    applyPublicTitle(data.publicTitle);
+    diagPort = (event.ports && event.ports[0]) || null;
+    if (!diagPort) {
+      return;
+    }
+    for (var i = 0; i < pendingErrors.length; i++) {
+      pendingErrors[i].versionId = diagVersionId;
+      sendPortMessage(pendingErrors[i]);
+    }
+    pendingErrors = [];
+    // rtfree-2（D-045 追補 3・codex-review P1-2）: onInit は **ready より必ず前**に呼ぶ。
+    // onInit はセーブ復元などゲームの初期化を行う場所であり、ここで throw する = 起動できていない。
+    // 以前は init が「load + rAF 2 回」より後に届くと readyFlag が既に true のため、
+    // tryReportReady() → onInit の順になり、onInit の例外が afterReady:true 扱いで報告され、
+    // 親が唯一の自動修正を抑制していた（D-045 で塞いだはずの「起動時の同期例外」の別経路）。
+    // 例外は reportError 経由で selfErrorCount を増やすので、下の tryReportReady が ready を見送る。
+    if (typeof GCN.onInit === "function") {
+      try {
+        GCN.onInit(GCN.saveData);
+      } catch (e) {
+        reportError(e && e.message ? e.message : String(e), e && e.stack);
+      }
+    }
+    // init が ready 条件（load + rAF 2 回）より後に届いた場合はここで即送信、
+    // 先に届いていた場合は load ハンドラ側の tryReportReady が後から送る（順序両対応）
+    tryReportReady();
+  });
+
+  global.addEventListener("error", function (event) {
+    // rtfree-2（D-045）: filename のホワイトリスト判定。自分の文書 / 同一オリジンの素材だけが
+    // 自動修正の候補になる（拡張注入スクリプトは filename が chrome-extension://… 等で弾かれる）
+    reportError(event.message, event.error && event.error.stack, isOwnSourceUrl(event.filename));
+  });
+  global.addEventListener("unhandledrejection", function (event) {
+    var reason = event.reason;
+    var stack = reason && reason.stack;
+    reportError(
+      reason && reason.message ? reason.message : String(reason),
+      stack,
+      stackMentionsOwnSource(stack)
+    );
+  });
+
+  // ready 自動送信: load イベントの後、requestAnimationFrame を 2 回挟んでからフラグを立てる
+  // （1 回だと最初の描画が済む前に ready を送ってしまい得るため。ゲート A の headless 検証が
+  // 最初のスクリーンショットを撮る前に初期描画が済んでいることを期待するため 2 回待つ）。
+  // rtfree-2（D-045 追補）: フラグが立っても、それまでに自分由来のエラーを観測していれば
+  // tryReportReady が送信を見送る（= ready は「読み込み完了」ではなく「起動できた」の合図）。
+  global.addEventListener("load", function () {
+    global.requestAnimationFrame(function () {
+      global.requestAnimationFrame(function () {
+        readyFlag = true;
+        tryReportReady();
+      });
+    });
+  });
+
+  // 送信抑制（ベストエフォートの UX 最適化）: GameKit と違い呼び出し頻度を生成コード側が
+  // 握るため、善意のゲームループ内から毎フレーム呼ばれた場合の MessagePort 連投を減らす。
+  // ただし bridge は未信頼のゲームコードと同一レルムにあり原理的に回避可能なので、これは
+  // セキュリティ境界ではない。D1 POST の権威的な入力・レート・帯域制御は、信頼済み親ページの
+  // Play.tsx が全ランタイム共通で行う（games/runtime/gamekit.js rt-9 の抑制も同じ位置づけ）。
+  // bridge 自身は「先頭即時 + 2 秒クールダウン + 末尾フラッシュ」に抑制する。
+  // クールダウン中の合成則はチャネルごとに異なる: サーバーはスコアを「受信した値のベスト」で
+  // 保持するため、score は最大値を残す（100 → 0 と続いても 100 を失わない）。save は最新値が正。
+  var THROTTLE_MS = 2000;
+  var TEARDOWN_WINDOW_MS = 2000;
+  // teardown 窓内の即時フラッシュ回数上限（チャネル別）。score は本文が数百バイトなので余裕を
+  // 持たせ、save は最大 4KB 強 × keepalive の合計 in-flight 64KiB 制限（Fetch 仕様）を圧迫しない
+  // よう 3 回に絞る（3 × 4KB ≒ 12KB。codex-review 反復 6 P2。現実のゲームの teardown 書き込みは
+  // 1〜2 回であり実質失わない）
+  var TEARDOWN_SCORE_FLUSH_BUDGET = 10;
+  var TEARDOWN_SAVE_FLUSH_BUDGET = 3;
+  // 通常の compose 出力では bridge を生成コードより前へ注入するため、この時点の Date.now /
+  // setTimeout を閉じ込め、後からの偶発的な monkey-patch の影響を減らす（反復 6 P1）。ただし
+  // 不正な HTML 配置等で先行 script が存在し得る以上、未汚染を権威性の根拠にはしない。
+  var nativeDateNow = Date.now;
+  var nativeSetTimeout = global.setTimeout.bind(global);
+  function makeThrottledSender(send, coalesce, teardownBudgetMax) {
+    var cooldown = false;
+    var pending = null;
+    function trigger(value) {
+      cooldown = true;
+      send(value);
+      nativeSetTimeout(function () {
+        cooldown = false;
+        if (pending !== null) {
+          var next = pending;
+          pending = null;
+          trigger(next);
+        }
+      }, THROTTLE_MS);
+    }
+    // teardown 用の即時フラッシュ窓。trusted なライフサイクルイベントを bridge のリスナーが
+    // 観測したときだけ「時間窓 + 回数上限」が付与され、窓内のクールダウン中 submit は即時
+    // フラッシュされる。これにより「ゲーム側の pagehide ハンドラが bridge のフラッシュより後に
+    // GCN.save/score を呼ぶ」順序でも、teardown 中に同一チャネルへ複数回書く正当なゲーム
+    // （pagehide リスナー 2 つ等。codex-review 反復 5 P1）でも最終値を取りこぼさない。
+    // document.visibilityState は Object.defineProperty で偽装できる（反復 4 P1）ため判定に
+    // 使わない — 窓は trusted イベント由来のみで、合成イベント・プロパティ偽装では開かない。
+    // 乱用の上限は「実イベント 1 回あたり teardownBudgetMax 回・TEARDOWN_WINDOW_MS 以内」。
+    // 上限超過後の書き込みは pending に合成されるだけになる（現実のゲームの teardown 書き込みは
+    // 1〜2 回であり実質失わない）
+    var teardownWindowUntil = 0;
+    var teardownFlushBudget = 0;
+    function submit(value) {
+      if (cooldown) {
+        pending = pending === null ? value : coalesce(pending, value);
+        if (teardownFlushBudget > 0 && nativeDateNow() < teardownWindowUntil) {
+          teardownFlushBudget--;
+          submit.flush();
+        }
+        return;
+      }
+      trigger(value);
+    }
+    // ページ破棄時の取りこぼし防止: クールダウン待ちの未送信値を即時送信する
+    // （タイマーはフレーム破棄で消えるため、待っていると親に届かない）
+    submit.flush = function () {
+      if (pending !== null) {
+        var next = pending;
+        pending = null;
+        send(next);
+      }
+    };
+    submit.armTeardownFlush = function () {
+      teardownWindowUntil = nativeDateNow() + TEARDOWN_WINDOW_MS;
+      teardownFlushBudget = teardownBudgetMax;
+    };
+    submit.disarmTeardownFlush = function () {
+      teardownWindowUntil = 0;
+      teardownFlushBudget = 0;
+    };
+    return submit;
+  }
+  var sendScoreThrottled = makeThrottledSender(function (score) {
+    sendPortMessage({ kind: "gamekit-score", versionId: diagVersionId, score: score });
+  }, function (a, b) {
+    return a > b ? a : b;
+  }, TEARDOWN_SCORE_FLUSH_BUDGET);
+  var sendSaveThrottled = makeThrottledSender(function (json) {
+    sendPortMessage({ kind: "gamekit-save", versionId: diagVersionId, data: json });
+  }, function (a, b) {
+    return b;
+  }, TEARDOWN_SAVE_FLUSH_BUDGET);
+  function flushPendingMessages() {
+    sendScoreThrottled.flush();
+    sendSaveThrottled.flush();
+  }
+  function armTeardownFlush() {
+    sendScoreThrottled.armTeardownFlush();
+    sendSaveThrottled.armTeardownFlush();
+  }
+  function disarmTeardownFlush() {
+    sendScoreThrottled.disarmTeardownFlush();
+    sendSaveThrottled.disarmTeardownFlush();
+  }
+  // pagehide は iOS Safari でも発火する。visibilitychange は保険（gamekit.js rt-9 と同じ）。
+  // isTrusted ガード: ゲームコードが dispatchEvent(new Event("pagehide")) で合成イベントを
+  // 連打してもフラッシュ（= スロットリングのバイパス経路）を踏めないようにする。
+  // フラッシュ後に arm するのは、同じイベントディスパッチ内で後から動くゲーム側ハンドラの
+  // GCN.save/score を即時送信するため（時間窓 + 回数上限。makeThrottledSender 参照）。
+  // hidden 判定は偽装可能な visibilityState を見ず「pagehide = 破棄へ向かう」
+  // 「visibilitychange = 表示状態が切り替わった」という trusted イベントの発生自体で扱う。
+  global.addEventListener("pagehide", function (event) {
+    if (event.isTrusted) {
+      flushPendingMessages();
+      armTeardownFlush();
+    }
+  });
+  global.addEventListener("pageshow", function (event) {
+    // bfcache から復帰したら通常のスロットリング動作に戻す（未使用の窓を破棄）
+    if (event.isTrusted) {
+      disarmTeardownFlush();
+    }
+  });
+  global.addEventListener("visibilitychange", function (event) {
+    // hidden への遷移か visible への復帰かを visibilityState で区別しない（偽装可能なため）。
+    // どちら向きでも「未送信分をフラッシュして窓を付与」で統一する — visible 復帰時に短時間の
+    // 即時送信を許すだけで、乱用には trusted イベントの実発生が必要なので有害でない
+    if (event.isTrusted) {
+      flushPendingMessages();
+      armTeardownFlush();
+    }
+  });
+
+  var GCN = {
+    saveData: null,
+    // rtfree-3（D-067）: 公開タイトル。gamekit-init 受信までは null（プレビューでは常に null）
+    publicTitle: null,
+    assets: assetsManifest,
+    onInit: undefined,
+    score: function (n) {
+      if (typeof n !== "number" || !isFinite(n)) {
+        reportError("GCN.score: 数値を渡してください");
+        return;
+      }
+      sendScoreThrottled(Math.floor(n));
+    },
+    save: function (json) {
+      if (typeof json !== "string") {
+        reportError("GCN.save: JSON 文字列を渡してください（JSON.stringify 済みのもの）");
+        return;
+      }
+      sendSaveThrottled(json);
+    }
+  };
+
+  global.GCN = GCN;
+})(window);
+</script>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>いろいろリフレックス</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}html,body{width:100%;height:100%;overflow:hidden;background:#090d23;color:#f5f4ff;font-family:-apple-system,BlinkMacSystemFont,"Hiragino Kaku Gothic ProN",sans-serif;user-select:none;-webkit-user-select:none}body{--tone:150,132,255;--ink:#c4b6ff;--orb:min(68vw,39vh,340px)}button{font:inherit;color:inherit;cursor:pointer;-webkit-tap-highlight-color:transparent;touch-action:none}button:focus-visible{outline:3px solid #fff;outline-offset:8px}[hidden]{display:none!important}#c{position:fixed;inset:0;width:100%;height:100%;touch-action:none}#wash{position:fixed;inset:0;pointer-events:none;background:radial-gradient(ellipse at 50% 49%,rgba(var(--tone),.20),transparent 65%);transition:background .12s}#hud{position:fixed;top:calc(env(safe-area-inset-top) + 24px);left:calc(env(safe-area-inset-left) + 25px);right:calc(env(safe-area-inset-right) + 25px);pointer-events:none}.hudrow{display:flex;justify-content:space-between;align-items:end}.label{font-size:10px;letter-spacing:.22em;color:#9298b8;font-weight:700}.number{font-size:36px;font-weight:750;font-variant-numeric:tabular-nums;letter-spacing:-.04em}.unit{font-size:12px;color:#a5aaca;margin-left:5px}.right{text-align:right}#track{height:3px;background:#ffffff10;border-radius:8px;margin-top:15px;overflow:hidden}#bar{width:100%;height:100%;background:linear-gradient(90deg,#a290ff,#7ff4d4);transform-origin:left;border-radius:8px}#stage{position:fixed;inset:0;pointer-events:none}#orb{position:absolute;left:50%;top:50%;width:var(--orb);height:var(--orb);transform:translate(-50%,-50%);border-radius:50%;border:1px solid rgba(var(--tone),.55);background:radial-gradient(circle at 38% 25%,rgba(var(--tone),.22),rgba(var(--tone),.045) 70%);box-shadow:0 0 65px rgba(var(--tone),.08),inset 0 0 65px rgba(var(--tone),.07);display:flex;align-items:center;justify-content:center;flex-direction:column;gap:11px}#phaseLabel{font-size:10px;letter-spacing:.3em;color:var(--ink);font-weight:600}#cue{font-size:clamp(30px,8vw,46px);font-weight:800;letter-spacing:.05em}#cueDetail{font-size:12px;color:var(--ink);letter-spacing:.05em}#info{position:absolute;top:calc(50% + var(--orb)/2 + 43px);width:100%;text-align:center}#last{font-size:18px;font-weight:650;letter-spacing:.03em}#chain{font-size:11px;color:#9298b8;margin-top:11px;letter-spacing:.12em}#foot{position:fixed;bottom:calc(env(safe-area-inset-bottom) + 24px);left:24px;right:24px;display:flex;justify-content:space-between;align-items:center;color:#777f9e;font-size:11px;letter-spacing:.05em}#mute{border:1px solid #ffffff20;border-radius:22px;background:#ffffff06;padding:10px 14px;font-size:11px;color:#b8bdd7}#title{position:fixed;inset:0;pointer-events:none;text-align:center}.heading{position:absolute;top:max(calc(env(safe-area-inset-top) + 70px),18%);left:6%;right:6%}.eyebrow{color:#afa1ef;font-size:10px;letter-spacing:.28em;font-weight:650;margin-bottom:12px}h1{font-size:clamp(22px,6vw,34px);letter-spacing:.05em;line-height:1.4}#intro{margin-top:14px;font-size:12px;color:#adb0cb;letter-spacing:.06em}#start{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:var(--orb);height:var(--orb);border:0;border-radius:50%;background:transparent;pointer-events:auto;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:13px}#start strong{font-size:28px;letter-spacing:.12em}#start span{color:#bcb2e2;font-size:11px;letter-spacing:.2em}.titlebottom{position:absolute;top:calc(50% + var(--orb)/2 + 44px);width:100%}.pill{display:inline-block;border:1px solid #ffffff1a;background:#ffffff04;border-radius:30px;padding:9px 18px;font-size:11px;color:#b8bad1;letter-spacing:.08em}.hint{margin-top:17px;color:#7e85a4;font-size:11px}#result{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;padding:calc(env(safe-area-inset-top) + 18px) 22px calc(env(safe-area-inset-bottom) + 18px);background:#090d23eF;overflow:auto}#card{width:min(100%,380px);text-align:center}.done{color:#91e9d3;font-size:11px;letter-spacing:.25em}#result h2{font-size:26px;margin:12px 0 18px;letter-spacing:.1em}#finalScore{font-size:76px;line-height:1.1;font-weight:750;letter-spacing:-.05em;text-shadow:0 0 40px #a491ff44}#newBest{font-size:11px;color:#b6a3ff;height:25px;margin-top:10px;letter-spacing:.15em}.stats{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:#ffffff13;border:1px solid #ffffff13;border-radius:18px;overflow:hidden;margin:20px 0}.stat{padding:16px 8px;background:#11152c}.stat p{font-size:10px;color:#9298b8;margin-bottom:7px}.stat strong{font-size:22px;font-variant-numeric:tabular-nums}.stat small{font-size:10px;color:#9298b8}#again{width:100%;border:1px solid #c0b2ff77;border-radius:16px;background:linear-gradient(120deg,#7a61d7,#5a51af);font-weight:700;padding:18px;font-size:16px;box-shadow:0 8px 40px #604bb332}#resultNote{font-size:11px;color:#8e96b5;margin-top:17px;line-height:1.7}body[data-phase="go"]{--tone:105,255,206;--ink:#a1ffe1}body[data-phase="success"]{--tone:255,154,128;--ink:#ffd1b9}body[data-phase="early"]{--tone:255,100,151;--ink:#ffb5d2}body[data-phase="miss"]{--tone:136,156,205;--ink:#b3c0e0}
+@media(max-height:540px) and (min-width:560px){body{--orb:min(48vh,240px)}.heading{top:28%;left:4%;right:auto;width:27%}h1{font-size:22px}.eyebrow{font-size:9px}#intro{line-height:1.8}.titlebottom{top:39%;left:72%;width:25%}.hint{line-height:1.8}#hud{top:calc(env(safe-area-inset-top) + 12px)}.number{font-size:26px}#track{margin-top:8px}#info{top:calc(50% + var(--orb)/2 + 17px)}#chain{margin-top:6px}#foot{bottom:calc(env(safe-area-inset-bottom) + 10px)}#card{width:min(90%,660px);display:grid;grid-template-columns:1fr 1fr;column-gap:35px;align-items:center}.resultlead{grid-column:1;grid-row:1/4}.stats{grid-column:2;margin:8px 0}.stat{padding:11px 5px}#again,#resultNote{grid-column:2}#finalScore{font-size:60px}#result h2{margin:9px 0}#resultNote{margin-top:10px}#cue{font-size:30px}}
+@media(max-height:630px) and (max-width:559px){.heading{top:15%}.eyebrow{margin-bottom:6px}#intro{margin-top:7px}.titlebottom{top:calc(50% + var(--orb)/2 + 27px)}#info{top:calc(50% + var(--orb)/2 + 27px)}#hud{top:calc(env(safe-area-inset-top) + 13px)}#finalScore{font-size:58px}.stats{margin:12px 0}.stat{padding:12px 8px}}
+</style>
+</head>
+<body data-gcn-state="title" data-phase="wait">
+<canvas id="c" aria-label="色が変わったらタップするゲーム面"></canvas><div id="wash"></div>
+<div id="hud"><div class="hudrow"><div><div class="label">のこり時間</div><span class="number" id="time">60</span><span class="unit">秒</span></div><div class="right"><div class="label">スコア</div><span class="number" id="score">0</span></div></div><div id="track"><div id="bar"></div></div></div>
+<div id="stage"><div id="orb"><div id="phaseLabel">色の合図をまとう</div><div id="cue">まって</div><div id="cueDetail">ミント色になったらタップ</div></div><div id="info"><div id="last">合図を見て、一度タップ</div><div id="chain">連続成功 0 回</div></div></div>
+<div id="title"><div class="heading"><div class="eyebrow">ひと息で、反射神経チャレンジ</div><h1 data-gcn-title>いろいろリフレックス</h1><p id="intro">ミント色になったら、タップ！</p></div><button id="start" type="button"><strong>はじめる</strong><span>60秒チャレンジ</span></button><div class="titlebottom"><div class="pill">まって → いま！ → タップ</div><div class="hint">早押しは −5点。あせらず、色を見て。</div></div></div>
+<div id="foot"><span id="bestLabel">自己ベスト 0</span><button id="mute" type="button" aria-pressed="false">音：オン</button></div>
+<div id="result" hidden><div id="card"><div class="resultlead"><div class="done">60秒チャレンジ / 終了</div><h2>おつかれさま！</h2><div class="label">今回のスコア</div><div id="finalScore">0</div><div id="newBest"></div></div><div class="stats"><div class="stat"><p>成功回数</p><strong id="successCount">0</strong> <small>回</small></div><div class="stat"><p>最速の反応</p><strong id="fastest">—</strong> <small id="fastUnit">ms</small></div><div class="stat"><p>平均の反応</p><strong id="average">—</strong> <small id="avgUnit">ms</small></div><div class="stat"><p>自己ベスト</p><strong id="bestResult">0</strong> <small>点</small></div></div><button id="again" type="button">もう一度あそぶ ↗</button><p id="resultNote">ミント色の「いま！」を見てタップ。<br>次は、もう少し速く。</p></div></div>
+<script>
+(function(){
+'use strict';
+var cv=document.getElementById('c'),ctx=cv.getContext('2d'),W=0,H=0,D=1;
+var el={};['title','stage','start','again','result','time','score','bar','phaseLabel','cue','cueDetail','last','chain','bestLabel','mute','finalScore','newBest','successCount','fastest','average','bestResult','fastUnit','avgUnit'].forEach(function(k){el[k]=document.getElementById(k);});
+var state='title',phase='wait',score=0,best=0,streak=0,hits=0,totalReaction=0,fastest=Infinity,startedAt=0,deadline=0,phaseAt=0,goAt=0,goWindow=1200;
+var t=0,pulse=0,flash=0,particles=[],rings=[],color=[150,132,255],target=[150,132,255],muted=false,ac=null,AC=window.AudioContext||window.webkitAudioContext;
+var pointerId=null,touchId=null,contact=false,clickSuppress=0;
+function resize(){W=innerWidth;H=innerHeight;D=Math.min(devicePixelRatio||1,2);cv.width=Math.round(W*D);cv.height=Math.round(H*D);}
+window.addEventListener('resize',resize);resize();
+GCN.onInit=function(s){var data=s;if(typeof s==='string'){try{data=JSON.parse(s);}catch(e){data=null;}}if(data&&typeof data.best==='number'&&isFinite(data.best))best=Math.max(best,Math.floor(data.best),0);refreshBest();};
+function refreshBest(){el.bestLabel.textContent='自己ベスト '+best;el.bestResult.textContent=best;}
+function audioReady(){try{if(!ac&&AC)ac=new AC();if(ac&&ac.state==='suspended'){var p=ac.resume();if(p&&p.catch)p.catch(function(){});}}catch(e){ac=null;}}
+function tone(freq,length){try{if(!ac||muted)return;var o=ac.createOscillator(),g=ac.createGain(),n=ac.currentTime;o.type='sine';o.frequency.setValueAtTime(freq,n);o.frequency.exponentialRampToValueAtTime(freq*.7,n+length);g.gain.setValueAtTime(.055,n);g.gain.exponentialRampToValueAtTime(.001,n+length);o.connect(g);g.connect(ac.destination);o.start(n);o.stop(n+length);}catch(e){}}
+function setPhase(p){phase=p;document.body.dataset.phase=p;target=p==='go'?[105,255,206]:p==='success'?[255,154,128]:p==='early'?[255,100,151]:p==='miss'?[136,156,205]:[150,132,255];var words={wait:['合図を待とう','まって','ミント色になったらタップ'],go:['今がチャンス','いま！','一度だけ、タップ！'],success:['ナイスリアクション','いいね！',''],early:['フライング','早い！','合図の前は −5点'],miss:['次の合図へ','おしい','だいじょうぶ、次を待とう']};el.phaseLabel.textContent=words[p][0];el.cue.textContent=words[p][1];el.cueDetail.textContent=words[p][2];}
+function burst(x,y,count){pulse=1;flash=.8;rings.push({x:x,y:y,r:20,life:1});for(var i=0;i<count;i++){var a=Math.random()*Math.PI*2,v=1.3+Math.random()*3;particles.push({x:x,y:y,vx:Math.cos(a)*v,vy:Math.sin(a)*v,life:1,size:1+Math.random()*2});}}
+function startGame(){if(state==='playing')return;state='playing';document.body.dataset.gcnState=state;el.title.hidden=true;el.result.hidden=true;el.stage.hidden=false;score=0;streak=0;hits=0;totalReaction=0;fastest=Infinity;particles=[];rings=[];startedAt=performance.now();deadline=startedAt+60000;phaseAt=startedAt+600;setPhase('wait');el.score.textContent='0';el.time.textContent='60';el.bar.style.transform='scaleX(1)';el.last.textContent='合図を見て、一度タップ';el.chain.textContent='連続成功 0 回';pulse=.7;}
+function endGame(){if(state!=='playing')return;state='ended';document.body.dataset.gcnState=state;el.stage.hidden=true;el.result.hidden=false;el.time.textContent='0';el.bar.style.transform='scaleX(0)';var record=score>best;best=Math.max(best,score);el.finalScore.textContent=score;el.newBest.textContent=record?'自己ベスト更新！':'また、60秒でチャレンジ';el.successCount.textContent=hits;el.fastest.textContent=hits?fastest:'未記録';el.average.textContent=hits?Math.round(totalReaction/hits):'未記録';el.fastUnit.hidden=!hits;el.avgUnit.hidden=!hits;refreshBest();try{GCN.score(score);GCN.save(JSON.stringify({best:best}));}catch(e){}tone(520,.3);}
+function advance(now){if(state!=='playing')return;if(now>=deadline){endGame();return;}if(now<phaseAt)return;if(phase==='wait'){goAt=now;var elapsed=now-startedAt;goWindow=elapsed>=40000?800:elapsed>=20000?1000:1200;phaseAt=now+goWindow;setPhase('go');pulse=.65;rings.push({x:W/2,y:H/2,r:30,life:.8});}else if(phase==='go'){streak=0;el.chain.textContent='連続成功 0 回';setPhase('miss');phaseAt=now+350;}else{setPhase('wait');phaseAt=now+900+Math.random()*900;}}
+function hit(x,y){var now=performance.now();advance(now);if(state!=='playing')return;if(phase==='go'){var rt=Math.max(0,Math.round(now-goAt));streak++;hits++;totalReaction+=rt;fastest=Math.min(fastest,rt);var gain=Math.max(10,Math.round(100-rt*.12))+Math.min(10,streak-1);score+=gain;setPhase('success');phaseAt=now+350;el.cueDetail.textContent=rt+' ms  /  +'+gain+'点';el.last.textContent='直前の反応 '+rt+' ms';el.chain.textContent='連続成功 '+streak+' 回';burst(x,y,25);tone(740,.14);}else if(phase==='wait'){score=Math.max(0,score-5);streak=0;setPhase('early');phaseAt=now+350;el.last.textContent='色が変わるまで、ひと呼吸';el.chain.textContent='連続成功 0 回';burst(x,y,12);tone(190,.16);}else{burst(x,y,7);}el.score.textContent=score;}
+function bindStart(button){function trigger(e){if(e.type!=='click')e.preventDefault();if(state==='playing')return;startGame();try{audioReady();tone(480,.12);}catch(err){}}button.addEventListener('click',trigger);button.addEventListener('pointerdown',trigger,{passive:false});button.addEventListener('touchstart',trigger,{passive:false});}
+bindStart(el.start);bindStart(el.again);
+el.mute.addEventListener('click',function(){muted=!muted;el.mute.textContent=muted?'音：オフ':'音：オン';el.mute.setAttribute('aria-pressed',String(muted));try{audioReady();if(!muted)tone(600,.1);}catch(e){}});
+function begin(kind,id,x,y){if(kind==='pointer'){if(pointerId!==null)return;pointerId=id;}else{if(touchId!==null)return;touchId=id;}if(contact)return;contact=true;clickSuppress=performance.now()+600;hit(x,y);try{audioReady();}catch(e){}}
+function move(kind,id,x,y){}
+function finish(kind,id){if(kind==='pointer'&&pointerId===id)pointerId=null;if(kind==='touch'&&touchId===id)touchId=null;if(pointerId===null&&touchId===null)contact=false;}
+cv.addEventListener('pointerdown',function(e){e.preventDefault();if(e.isPrimary===false)return;try{cv.setPointerCapture(e.pointerId);}catch(err){}begin('pointer',e.pointerId,e.clientX,e.clientY);},{passive:false});
+cv.addEventListener('pointermove',function(e){move('pointer',e.pointerId,e.clientX,e.clientY);});
+cv.addEventListener('pointerup',function(e){finish('pointer',e.pointerId);});cv.addEventListener('pointercancel',function(e){finish('pointer',e.pointerId);});
+cv.addEventListener('touchstart',function(e){e.preventDefault();var q=e.changedTouches[0];if(q)begin('touch',q.identifier,q.clientX,q.clientY);},{passive:false});
+cv.addEventListener('touchmove',function(e){e.preventDefault();for(var i=0;i<e.changedTouches.length;i++){var q=e.changedTouches[i];move('touch',q.identifier,q.clientX,q.clientY);}},{passive:false});
+function touchEnd(e){e.preventDefault();for(var i=0;i<e.changedTouches.length;i++)finish('touch',e.changedTouches[i].identifier);}
+cv.addEventListener('touchend',touchEnd,{passive:false});cv.addEventListener('touchcancel',touchEnd,{passive:false});
+cv.addEventListener('click',function(e){if(performance.now()<clickSuppress)return;hit(e.clientX,e.clientY);try{audioReady();}catch(err){}});
+function update(){t+=1/60;pulse*=.9;flash*=.86;for(var j=0;j<3;j++)color[j]+=(target[j]-color[j])*.2;for(var i=particles.length-1;i>=0;i--){var p=particles[i];p.x+=p.vx;p.y+=p.vy;p.vx*=.98;p.vy*=.98;p.life-=.026;if(p.life<=0)particles.splice(i,1);}for(var k=rings.length-1;k>=0;k--){rings[k].r+=4;rings[k].life-=.025;if(rings[k].life<=0)rings.splice(k,1);}var now=performance.now();advance(now);if(state==='playing'){var left=Math.max(0,deadline-now);el.time.textContent=Math.ceil(left/1000);el.bar.style.transform='scaleX('+(left/60000)+')';}}
+function draw(){ctx.setTransform(D,0,0,D,0,0);var c=color.map(function(v){return Math.round(v);}).join(',');var g=ctx.createLinearGradient(0,0,W,H);g.addColorStop(0,'#10142e');g.addColorStop(.5,'#0c1027');g.addColorStop(1,'#070b1d');ctx.fillStyle=g;ctx.fillRect(0,0,W,H);var glow=ctx.createRadialGradient(W/2,H/2,0,W/2,H/2,Math.max(W,H)*.65);glow.addColorStop(0,'rgba('+c+','+(.13+flash*.13)+')');glow.addColorStop(1,'rgba('+c+',0)');ctx.fillStyle=glow;ctx.fillRect(0,0,W,H);for(var i=0;i<45;i++){var x=(Math.sin(i*45.17)*.5+.5)*W,y=((i*73.37+t*(2+i%3))% (H+40))-20;ctx.fillStyle='rgba(184,190,255,'+(.08+.12*(.5+.5*Math.sin(t+i)))+')';ctx.beginPath();ctx.arc(x,y,i%4===0?1.4:.65,0,Math.PI*2);ctx.fill();}var r=Math.min(W*.68,H*.39,340)/2;if(W>=560&&H<=540)r=Math.min(H*.48,240)/2;ctx.save();ctx.translate(W/2,H/2);ctx.strokeStyle='rgba('+c+',.13)';ctx.lineWidth=1;[1.10,1.23,1.37].forEach(function(s,k){ctx.beginPath();ctx.arc(0,0,r*s+Math.sin(t*1.6+k)*2,0,Math.PI*2);ctx.stroke();});ctx.rotate(t*.09);for(var a=0;a<48;a++){var angle=a/48*Math.PI*2;ctx.strokeStyle='rgba('+c+','+(a%4===0?.4:.12)+')';ctx.beginPath();ctx.moveTo(Math.cos(angle)*r*1.30,Math.sin(angle)*r*1.30);ctx.lineTo(Math.cos(angle)*r*(a%4===0?1.34:1.32),Math.sin(angle)*r*(a%4===0?1.34:1.32));ctx.stroke();}ctx.rotate(-t*.21);ctx.shadowColor='rgb('+c+')';ctx.shadowBlur=12;ctx.strokeStyle='rgba('+c+',.7)';ctx.lineWidth=2;ctx.beginPath();ctx.arc(0,0,r*1.10,.25,1.15);ctx.stroke();ctx.beginPath();ctx.arc(0,0,r*1.23,3.3,3.8);ctx.stroke();ctx.restore();if(pulse>.01){ctx.strokeStyle='rgba('+c+','+pulse*.5+')';ctx.lineWidth=2;ctx.beginPath();ctx.arc(W/2,H/2,r*(1.04+(1-pulse)*.12),0,Math.PI*2);ctx.stroke();}ctx.globalCompositeOperation='lighter';for(var k=0;k<rings.length;k++){var q=rings[k];ctx.strokeStyle='rgba('+c+','+q.life*.65+')';ctx.lineWidth=1.5;ctx.beginPath();ctx.arc(q.x,q.y,q.r,0,Math.PI*2);ctx.stroke();}for(var n=0;n<particles.length;n++){var p=particles[n];ctx.fillStyle='rgba('+c+','+p.life+')';ctx.shadowBlur=8;ctx.shadowColor='rgb('+c+')';ctx.beginPath();ctx.arc(p.x,p.y,p.size*p.life,0,Math.PI*2);ctx.fill();}ctx.shadowBlur=0;ctx.globalCompositeOperation='source-over';}
+var STEP=1000/60,acc=0,prevNow=0;function frame(now){requestAnimationFrame(frame);if(!prevNow)prevNow=now;var dt=Math.min(now-prevNow,250);prevNow=now;acc+=dt;var steps=0;while(acc>=STEP&&steps<5){acc-=STEP;steps++;update();}if(steps>=5)acc=0;draw();}
+el.stage.hidden=true;requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
