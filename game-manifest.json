@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "gameId": "m5qb1jhgwrho",
+  "title": "疎通テスト",
+  "versionId": "ba9f2434-bd02-45e7-b5fd-c95d456b0c09",
+  "snapshotAt": "2026-10-19T16:05:27.114Z",
+  "playUrl": "https://gcn-play.com/play/m5qb1jhgwrho",
+  "files": [
+    {
+      "path": "README.md",
+      "mime": "text/markdown; charset=utf-8",
+      "bytes": 1865,
+      "sha256": "7d229542830316e4a29e8579d69a4b0e1a84c8141dc6feb3db0804956f1c207d"
+    },
+    {
+      "path": "index.html",
+      "mime": "text/html; charset=utf-8",
+      "bytes": 48264,
+      "sha256": "4088d783ac74259b4d9532f7aa268946ba51e853514b8bf1d07d7f841746bb0a"
+    }
+  ],
+  "skipped": []
+}
